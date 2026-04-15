@@ -35,7 +35,7 @@ A compressor reacts to level over time and reduces dynamic range once a threshol
 ### A limiter
 A limiter is primarily a protection device, it prevents peaks from exceeding a ceiling, it's excellent at safety but by itself it does not decide *how* the audio should be shaped before that ceiling is reached.
 
-### CALP processor instead, combines several ideas into one coherent system:
+### CALP, instead, combines several ideas into one coherent system:
 - **perceptual weighting** before analysis
 - **content-aware gain shaping** instead of blunt level chasing
 - **curve-based decisions** instead of hard on/off thresholds
