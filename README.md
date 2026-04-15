@@ -240,11 +240,6 @@ After processing, you should expect:
 
 ## Suggested workflow integration
 
-This tool works best as a **pre-broadcast or pre-mastering stage**:
-
-```
-raw audio → content-aware loudness processor → broadcast chain / mixer / playlist system
-```
-
+This tool works best as a **pre-broadcast or pre-mastering stage**.
 It is not intended to replace a mastering engineer but to make material more consistent before it enters a broadcast pipeline.
 
