@@ -236,6 +236,7 @@ After processing, you should expect:
 - It is optimized for full-track processing, not live input
 - Results depend heavily on source material (lo-fi, dynamic recordings, modern mastered tracks will behave differently)
 - Heavy ram usage, single core, not optimized for performance, with a 5min audio file it eats up to 4gb of ram.
+- Output file will be 44100hz / 16bit
 
 ---
 
