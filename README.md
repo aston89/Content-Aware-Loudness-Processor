@@ -253,16 +253,14 @@ It is not intended to replace a mastering engineer but to make material more con
 During testing, CALP was intentionally driven beyond typical mastering ranges like -6 LUFS region and below in order to observe failure modes and limiter interaction under extreme conditions.
 
 What emerged was not a traditional collapse or hard clipping behavior but rather a gradual transition of the system’s operating regime.
-- At moderate targets (≈ -16 to -12 LUFS), the processor behaves as intended: a content-aware loudness shaper that preserves the original dynamic structure - while improving perceived loudness consistency.
+- **At moderate targets** (≈ -16 to -12 LUFS), the processor behaves as intended: a content-aware loudness shaper that preserves the original dynamic structure - while improving perceived loudness consistency.
 
-- As the target approaches more aggressive loudness values (≈ -10 to -8 LUFS), the limiter begins to play a more active role, but remains secondary to the gain-shaping logic.
+- **As the target approaches more aggressive loudness values** (≈ -10 to -8 LUFS), the limiter begins to play a more active role, but remains secondary to the gain-shaping logic.
 
-- Beyond this region (≈ -7 LUFS and higher loudness demands), the system transitions into a hybrid state where peak protection and loudness shaping are no longer clearly separable: In this regime, the interaction between band-aware gain control, transient suppression and true-peak limiting produces a form of controlled, distributed  saturation, this is not an explicitly designed “coloration stage" but rather an emergent consequence of overlapping constraints competing for headroom.
+- **Beyond this region** (≈ -7 LUFS and higher loudness demands), the system transitions into a ***hybrid state** where peak protection and loudness shaping are no longer clearly separable: In this regime, the interaction between band-aware gain control, transient suppression and true-peak limiting produces a form of **controlled, distributed saturation**, this is not an explicitly designed “coloration stage" but rather an **emergent consequence** of overlapping constraints competing for headroom, this behavior resemble a **tape-like or analog saturation character like IVGI2 or SSL4000 vst's** but is fundamentally different from a static non-linear processors: the distortion is time-dependent, context-aware and dynamically allocated across frequency bands rather than applied as a single transfer curve.
 
-Subjectively, this behavior resemble a tape-like or analog saturation character like IVGI2 or SSL4000 vst's but is fundamentally different from a static non-linear processors: the distortion is time-dependent, context-aware and dynamically allocated across frequency bands rather than applied as a single transfer curve.
+**At extreme lufs settings the system no longer behaves as a transparent loudness corrector**, instead, it enters a regime best described as constraint-driven reshaping where the limiter is continuously engaged and the gain model adapts in real time to preserve intelligibility and prevent catastrophic clipping.
 
-At extreme settings the system no longer behaves as a transparent loudness corrector. Instead, it enters a regime best described as constraint-driven reshaping where the limiter is continuously engaged and the gain model adapts in real time to preserve intelligibility and prevent catastrophic clipping.
-
-This behavior is not the primary design goal and should not be considered a feature in the conventional sense.
-However, it is a predictable outcome of the architecture under extreme input conditions and may be of interest for those who like lo-fi or music creators  where controlled non-linearity is desirable.
+**This behavior is not the primary design goal** and should not be considered a feature in the conventional sense.
+However, it is a predictable outcome of the architecture under extreme input conditions and **may be of interest for those who like lo-fi or music creators**  where controlled non-linearity is desirable.
 
