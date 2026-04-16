@@ -3,10 +3,90 @@ from collections import deque
 
 import numpy as np
 import soundfile as sf
-from scipy.signal import butter, sosfilt
+from scipy.signal import butter, sosfilt, resample_poly
+import pyloudnorm as pyln
+
+# ============================================================
+# CONFIG
+# ============================================================
+
+TARGET_LUFS_DEFAULT = -14.0
+
+# analysis
+K_WEIGHT_HP_HZ = 38.0
+K_WEIGHT_SHELF_HZ = 4000.0
+K_WEIGHT_SHELF_GAIN_DB = 4.0
+K_WEIGHT_SHELF_SLOPE = 0.7
+
+BAND_LOW_CUTOFF_HZ = 200.0
+BAND_HIGH_CUTOFF_HZ = 4000.0
+
+ANALYSIS_WINDOW_SEC = 3.0
+ANALYSIS_HOP_SEC = 0.5
+
+# control curve
+GATE_CENTER_DB = -50.0
+GATE_SLOPE = 0.30
+CREST_CENTER_DB = 10.0
+CREST_SLOPE = 0.75
+TRANSIENT_STRENGTH = 7.0
+MAX_GAIN_DB = 12.0
+
+BAND_BIAS = {
+    "low": 0.85,
+    "mid": 1.00,
+    "high": 0.92,
+}
+
+BAND_SHIFT_DB = {
+    "low": -1.0,
+    "mid": 0.0,
+    "high": 0.8,
+}
+
+BAND_TRANSIENT_SCALE = {
+    "low": 0.65,
+    "mid": 1.0,
+    "high": 0.9,
+}
+
+# smoothing
+GLOBAL_ATTACK = 0.10
+GLOBAL_RELEASE = 0.03
+BAND_ATTACK = {
+    "low": 0.08,
+    "mid": 0.10,
+    "high": 0.08,
+}
+BAND_RELEASE = {
+    "low": 0.03,
+    "mid": 0.03,
+    "high": 0.02,
+}
+
+# limiter
+LIMITER_CEILING = 0.98
+LIMITER_LOOKAHEAD_MS = 6.0
+LIMITER_OVERSAMPLE = 4
+LIMITER_ATTACK = 0.25
+LIMITER_RELEASE = 0.004
+
+# export
+OUTPUT_SUBTYPE = "PCM_16"
+OUTPUT_FORMAT = "WAV"
+DITHER_ENABLED = True
+
+# convergence
+FINAL_LUFS_TOLERANCE_DB = 0.15
+FINAL_LUFS_ITERATIONS = 2
+MAX_INPUT_NORMALIZATION = 1.5
 
 EPS = 1e-12
 
+
+# ============================================================
+# UTILS
+# ============================================================
 
 def db(x):
     return 20.0 * np.log10(np.maximum(x, EPS))
@@ -20,12 +100,34 @@ def sigmoid(x, center, slope):
     return 1.0 / (1.0 + np.exp(-(x - center) * slope))
 
 
+def attack_release_smooth(desired, attack=0.08, release=0.015):
+    desired = np.asarray(desired, dtype=np.float64)
+    if len(desired) == 0:
+        return desired
+
+    out = np.empty_like(desired)
+    out[0] = desired[0]
+    for i in range(1, len(desired)):
+        coef = attack if desired[i] < out[i - 1] else release
+        out[i] = coef * desired[i] + (1.0 - coef) * out[i - 1]
+    return out
+
+
+def audio_safety(x):
+    x = np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+    x = np.clip(x, -1.0, 1.0)
+    return np.ascontiguousarray(x.astype(np.float32))
+
+
+# ============================================================
+# FILTERS
+# ============================================================
+
 def biquad_sos(b0, b1, b2, a0, a1, a2):
     return np.array([[b0 / a0, b1 / a0, b2 / a0, 1.0, a1 / a0, a2 / a0]], dtype=np.float64)
 
 
 def high_shelf_sos(fs, f0=4000.0, gain_db=4.0, slope=0.7):
-    # RBJ Audio EQ Cookbook
     A = 10.0 ** (gain_db / 40.0)
     w0 = 2.0 * np.pi * f0 / fs
     cosw0 = np.cos(w0)
@@ -45,36 +147,25 @@ def high_shelf_sos(fs, f0=4000.0, gain_db=4.0, slope=0.7):
 
 
 def k_weighting_sos(fs):
-    hp = butter(2, 38.0 / (fs / 2.0), btype="highpass", output="sos")
-    shelf = high_shelf_sos(fs, f0=4000.0, gain_db=4.0, slope=0.7)
+    hp = butter(2, K_WEIGHT_HP_HZ / (fs / 2.0), btype="highpass", output="sos")
+    shelf = high_shelf_sos(fs, f0=K_WEIGHT_SHELF_HZ, gain_db=K_WEIGHT_SHELF_GAIN_DB, slope=K_WEIGHT_SHELF_SLOPE)
     return np.vstack((hp, shelf))
 
 
 def design_band_sos(fs):
-    low = butter(4, 200.0 / (fs / 2.0), btype="lowpass", output="sos")
-    mid = butter(4, [200.0 / (fs / 2.0), 4000.0 / (fs / 2.0)], btype="bandpass", output="sos")
-    high = butter(4, 4000.0 / (fs / 2.0), btype="highpass", output="sos")
+    low = butter(4, BAND_LOW_CUTOFF_HZ / (fs / 2.0), btype="lowpass", output="sos")
+    mid = butter(4, [BAND_LOW_CUTOFF_HZ / (fs / 2.0), BAND_HIGH_CUTOFF_HZ / (fs / 2.0)], btype="bandpass", output="sos")
+    high = butter(4, BAND_HIGH_CUTOFF_HZ / (fs / 2.0), btype="highpass", output="sos")
     return low, mid, high
 
 
-def attack_release_smooth(desired, attack=0.08, release=0.015):
-    desired = np.asarray(desired, dtype=np.float64)
-    out = np.empty_like(desired)
-    out[0] = desired[0]
-    for i in range(1, len(desired)):
-        coef = attack if desired[i] < out[i - 1] else release
-        out[i] = coef * desired[i] + (1.0 - coef) * out[i - 1]
-    return out
+# ============================================================
+# ANALYSIS
+# ============================================================
 
-
-def sample_holds(frame_vals, n_samples, hop, frame_len):
-    frame_vals = np.asarray(frame_vals, dtype=np.float64)
-    if len(frame_vals) == 1:
-        return np.full(n_samples, frame_vals[0], dtype=np.float64)
-
-    centers = np.arange(len(frame_vals), dtype=np.float64) * hop + (frame_len / 2.0)
-    xs = np.arange(n_samples, dtype=np.float64)
-    return np.interp(xs, centers, frame_vals, left=frame_vals[0], right=frame_vals[-1])
+def measure_lufs(x, sr):
+    meter = pyln.Meter(sr)
+    return meter.integrated_loudness(x.astype(np.float32))
 
 
 def band_features(block):
@@ -89,6 +180,103 @@ def band_features(block):
     return level, crest, trans
 
 
+def collect_frame_metrics(mono_w, low_sig, mid_sig, high_sig, sr):
+    n = len(mono_w)
+    if n == 0:
+        raise ValueError("Audio vuoto.")
+
+    window = min(int(ANALYSIS_WINDOW_SEC * sr), n)
+    hop = max(1, int(ANALYSIS_HOP_SEC * sr))
+
+    frame_metrics = []
+    band_metrics = {"low": [], "mid": [], "high": []}
+
+    if n <= window:
+        seg = slice(0, n)
+        frame_metrics.append(band_features(mono_w[seg]))
+        band_metrics["low"].append(band_features(low_sig[seg]))
+        band_metrics["mid"].append(band_features(mid_sig[seg]))
+        band_metrics["high"].append(band_features(high_sig[seg]))
+        return frame_metrics, band_metrics, window, hop
+
+    for i in range(0, n - window + 1, hop):
+        seg = slice(i, i + window)
+        frame_metrics.append(band_features(mono_w[seg]))
+        band_metrics["low"].append(band_features(low_sig[seg]))
+        band_metrics["mid"].append(band_features(mid_sig[seg]))
+        band_metrics["high"].append(band_features(high_sig[seg]))
+
+    if not frame_metrics:
+        seg = slice(0, n)
+        frame_metrics.append(band_features(mono_w[seg]))
+        band_metrics["low"].append(band_features(low_sig[seg]))
+        band_metrics["mid"].append(band_features(mid_sig[seg]))
+        band_metrics["high"].append(band_features(high_sig[seg]))
+
+    return frame_metrics, band_metrics, window, hop
+
+
+# ============================================================
+# CONTROL
+# ============================================================
+
+def build_gain_curves(analysis, target_lufs):
+    frame_metrics = analysis["frame_metrics"]
+    band_metrics = analysis["band_metrics"]
+
+    base_gain_db = target_lufs - analysis["lufs"]
+
+    global_frames = []
+    band_frames = {"low": [], "mid": [], "high": []}
+
+    for level, crest, trans in frame_metrics:
+        gate = sigmoid(level, GATE_CENTER_DB, GATE_SLOPE)
+        crest_f = 1.0 - sigmoid(crest, CREST_CENTER_DB, CREST_SLOPE)
+        trans_f = np.exp(-trans * TRANSIENT_STRENGTH)
+
+        g = base_gain_db * gate * crest_f * trans_f
+        global_frames.append(np.clip(g, -MAX_GAIN_DB, MAX_GAIN_DB))
+
+    for name in ("low", "mid", "high"):
+        for level, crest, trans in band_metrics[name]:
+            shift = BAND_SHIFT_DB[name]
+            trans_scale = BAND_TRANSIENT_SCALE[name]
+
+            gate = sigmoid(level, GATE_CENTER_DB + shift, GATE_SLOPE)
+            crest_f = 1.0 - sigmoid(crest, CREST_CENTER_DB + shift, CREST_SLOPE)
+            trans_f = np.exp(-trans * TRANSIENT_STRENGTH * trans_scale)
+
+            g = base_gain_db * gate * crest_f * trans_f * BAND_BIAS[name]
+            band_frames[name].append(np.clip(g, -MAX_GAIN_DB, MAX_GAIN_DB))
+
+    global_frames = attack_release_smooth(global_frames, attack=GLOBAL_ATTACK, release=GLOBAL_RELEASE)
+
+    for k in band_frames:
+        band_frames[k] = attack_release_smooth(
+            band_frames[k],
+            attack=BAND_ATTACK[k],
+            release=BAND_RELEASE[k]
+        )
+
+    return global_frames, band_frames
+
+
+def sample_hold(frames, n_samples, hop, frame_len):
+    frames = np.asarray(frames, dtype=np.float64)
+    if len(frames) == 0:
+        return np.zeros(n_samples, dtype=np.float64)
+    if len(frames) == 1:
+        return np.full(n_samples, frames[0], dtype=np.float64)
+
+    centers = np.arange(len(frames), dtype=np.float64) * hop + (frame_len / 2.0)
+    xs = np.arange(n_samples, dtype=np.float64)
+    return np.interp(xs, centers, frames, left=frames[0], right=frames[-1])
+
+
+# ============================================================
+# LIMITER
+# ============================================================
+
 def sliding_forward_max(x, size):
     """
     For each sample i, returns max(x[i : i+size]).
@@ -96,9 +284,8 @@ def sliding_forward_max(x, size):
     x = np.asarray(x, dtype=np.float64)
     n = len(x)
     out = np.empty(n, dtype=np.float64)
-    dq = deque()  # (index, value), decreasing by value
+    dq = deque()
 
-    # seed with first window
     for i in range(min(size, n)):
         val = x[i]
         while dq and dq[-1][1] <= val:
@@ -106,11 +293,9 @@ def sliding_forward_max(x, size):
         dq.append((i, val))
 
     for i in range(n):
-        # drop expired
         while dq and dq[0][0] < i:
             dq.popleft()
 
-        # window end is i + size - 1
         j = i + size - 1
         if j < n:
             val = x[j]
@@ -123,146 +308,145 @@ def sliding_forward_max(x, size):
     return out
 
 
-def process(input_path, output_path, target_lufs=-14.0):
+def true_peak_limiter(x, sr, ceiling=LIMITER_CEILING, lookahead_ms=LIMITER_LOOKAHEAD_MS, up=LIMITER_OVERSAMPLE):
+    mono = np.mean(x, axis=1)
+
+    mono_os = resample_poly(mono, up, 1)
+    abs_os = np.abs(mono_os)
+
+    lookahead_os = max(1, int(sr * lookahead_ms / 1000.0 * up))
+    future_peak_os = sliding_forward_max(abs_os, lookahead_os)
+
+    n = len(mono)
+    if len(future_peak_os) < n * up:
+        pad = n * up - len(future_peak_os)
+        future_peak_os = np.pad(future_peak_os, (0, pad), mode="edge")
+
+    future_peak_base = future_peak_os[: n * up].reshape(n, up).max(axis=1)
+
+    gain = np.minimum(1.0, ceiling / (future_peak_base + EPS))
+    gain = attack_release_smooth(gain, attack=LIMITER_ATTACK, release=LIMITER_RELEASE)
+
+    return x * gain[:, None]
+
+
+# ============================================================
+# DITHER / EXPORT
+# ============================================================
+
+def tpdf_dither(x):
+    amp = 1.0 / 32768.0
+    n = np.random.uniform(-amp, amp, x.shape)
+    n += np.random.uniform(-amp, amp, x.shape)
+    return x + n
+
+
+def export_pcm16_wav(x, sr, path):
+    x = audio_safety(x)
+    if DITHER_ENABLED:
+        x = tpdf_dither(x)
+    x = audio_safety(x)
+    sf.write(path, x, sr, subtype=OUTPUT_SUBTYPE, format=OUTPUT_FORMAT)
+
+
+# ============================================================
+# PROCESS
+# ============================================================
+
+def process(input_path, output_path, target_lufs=TARGET_LUFS_DEFAULT):
     audio, sr = sf.read(input_path, always_2d=True)
     audio = audio.astype(np.float64)
 
-    # normalize only if file is way out of range
+    if audio.size == 0:
+        raise ValueError("File audio vuoto.")
+
     mx = np.max(np.abs(audio))
-    if mx > 1.5:
-        audio /= mx
+    if mx > MAX_INPUT_NORMALIZATION:
+        audio = audio / mx
 
     mono = np.mean(audio, axis=1)
 
-    # analysis weighting
+    # ANALYSIS
+    lufs_in = measure_lufs(mono, sr)
+
+    low_f, mid_f, high_f = design_band_sos(sr)
     kw = k_weighting_sos(sr)
     mono_w = sosfilt(kw, mono)
 
-    # multiband split for processing
-    low_sos, mid_sos, high_sos = design_band_sos(sr)
-    low_m = sosfilt(low_sos, mono)
-    mid_m = sosfilt(mid_sos, mono)
-    high_m = sosfilt(high_sos, mono)
+    low_sig = sosfilt(low_f, mono)
+    mid_sig = sosfilt(mid_f, mono)
+    high_sig = sosfilt(high_f, mono)
 
-    # rough loudness estimate
-    global_lufs = db(np.sqrt(np.mean(np.square(mono_w)) + EPS))
-    base_gain_db = target_lufs - global_lufs
+    frame_metrics, band_metrics, frame_len, hop = collect_frame_metrics(
+        mono_w, low_sig, mid_sig, high_sig, sr
+    )
 
-    window = int(3.0 * sr)
-    hop = max(1, int(0.5 * sr))
+    analysis = {
+        "lufs": lufs_in,
+        "frame_metrics": frame_metrics,
+        "band_metrics": band_metrics,
+    }
 
-    if len(mono) < window:
-        raise ValueError("Audio file too short for the chosen analysis window.")
+    # CONTROL
+    global_frames, band_frames = build_gain_curves(analysis, target_lufs)
 
-    frame_metrics = []
-    band_metrics = {"low": [], "mid": [], "high": []}
+    global_gain = lin(sample_hold(global_frames, len(audio), hop, frame_len))
+    low_gain = lin(sample_hold(band_frames["low"], len(audio), hop, frame_len))
+    mid_gain = lin(sample_hold(band_frames["mid"], len(audio), hop, frame_len))
+    high_gain = lin(sample_hold(band_frames["high"], len(audio), hop, frame_len))
 
-    for start in range(0, len(mono) - window + 1, hop):
-        end = start + window
+    # RENDER
+    out = np.zeros_like(audio, dtype=np.float64)
 
-        level, crest, trans = band_features(mono_w[start:end])
-        frame_metrics.append((level, crest, trans))
-
-        for name, sig in (("low", low_m), ("mid", mid_m), ("high", high_m)):
-            blevel, bcrest, btrans = band_features(sig[start:end])
-            band_metrics[name].append((blevel, bcrest, btrans))
-
-    # curve controls
-    GATE_CENTER = -50.0
-    GATE_SLOPE = 0.30
-    CREST_CENTER = 10.0
-    CREST_SLOPE = 0.75
-    TRANSIENT_STRENGTH = 7.0
-    MAX_GAIN_DB = 12.0
-
-    band_bias = {"low": 0.85, "mid": 1.00, "high": 0.92}
-
-    global_gain_db_frames = []
-    band_gain_db_frames = {"low": [], "mid": [], "high": []}
-
-    for level, crest, trans in frame_metrics:
-        gate = sigmoid(level, GATE_CENTER, GATE_SLOPE)
-        crest_factor = 1.0 - sigmoid(crest, CREST_CENTER, CREST_SLOPE)
-        transient_factor = np.exp(-trans * TRANSIENT_STRENGTH)
-
-        gain_db = base_gain_db * gate * crest_factor * transient_factor
-        gain_db = np.clip(gain_db, -MAX_GAIN_DB, MAX_GAIN_DB)
-        global_gain_db_frames.append(gain_db)
-
-    for band_name in ("low", "mid", "high"):
-        for level, crest, trans in band_metrics[band_name]:
-            if band_name == "low":
-                center_shift = -1.0
-                transient_scale = 0.65
-            elif band_name == "mid":
-                center_shift = 0.0
-                transient_scale = 1.0
-            else:
-                center_shift = 0.8
-                transient_scale = 0.9
-
-            gate = sigmoid(level, GATE_CENTER + center_shift, GATE_SLOPE)
-            crest_factor = 1.0 - sigmoid(crest, CREST_CENTER + center_shift, CREST_SLOPE)
-            transient_factor = np.exp(-trans * TRANSIENT_STRENGTH * transient_scale)
-
-            gain_db = base_gain_db * gate * crest_factor * transient_factor * band_bias[band_name]
-            gain_db = np.clip(gain_db, -MAX_GAIN_DB, MAX_GAIN_DB)
-            band_gain_db_frames[band_name].append(gain_db)
-
-    global_gain_db_frames = attack_release_smooth(global_gain_db_frames, attack=0.10, release=0.03)
-    for band_name in band_gain_db_frames:
-        atk = 0.10 if band_name == "mid" else 0.08
-        rel = 0.03 if band_name != "high" else 0.02
-        band_gain_db_frames[band_name] = attack_release_smooth(
-            band_gain_db_frames[band_name], attack=atk, release=rel
-        )
-
-    global_gain = lin(sample_holds(global_gain_db_frames, len(audio), hop, window))
-    low_gain = lin(sample_holds(band_gain_db_frames["low"], len(audio), hop, window))
-    mid_gain = lin(sample_holds(band_gain_db_frames["mid"], len(audio), hop, window))
-    high_gain = lin(sample_holds(band_gain_db_frames["high"], len(audio), hop, window))
-
-    out = np.zeros_like(audio)
     for ch in range(audio.shape[1]):
         x = audio[:, ch]
-        low = sosfilt(low_sos, x) * low_gain
-        mid = sosfilt(mid_sos, x) * mid_gain
-        high = sosfilt(high_sos, x) * high_gain
-        out[:, ch] = (low + mid + high) * global_gain
 
-    # limiter
-    peak = np.max(np.abs(out), axis=1)
-    LOOKAHEAD_MS = 6.0
-    lookahead = max(1, int(sr * LOOKAHEAD_MS / 1000.0))
-    future_peak = sliding_forward_max(peak, lookahead)
+        l = sosfilt(low_f, x) * low_gain
+        m = sosfilt(mid_f, x) * mid_gain
+        h = sosfilt(high_f, x) * high_gain
 
-    threshold = 0.98
-    desired_gain = np.minimum(1.0, threshold / (future_peak + EPS))
-    desired_gain = attack_release_smooth(desired_gain, attack=0.25, release=0.004)
+        out[:, ch] = (l + m + h) * global_gain
 
-    out *= desired_gain[:, None]
+    # LIMITER
+    out = true_peak_limiter(out, sr)
 
-    # final safety
-    out = np.tanh(out * 1.05) / np.tanh(1.05)
+    # FINAL LUFS CONVERGENCE
+    for _ in range(FINAL_LUFS_ITERATIONS):
+        out_mono = np.mean(out, axis=1)
+        lufs_out = measure_lufs(out_mono, sr)
+        delta_db = target_lufs - lufs_out
 
-    peak_out = np.max(np.abs(out))
-    if peak_out > 1.0:
-        out /= peak_out
+        if abs(delta_db) <= FINAL_LUFS_TOLERANCE_DB:
+            break
 
-    sf.write(output_path, out, sr)
-    print(f"input  : {input_path}")
-    print(f"output : {output_path}")
-    print(f"sr     : {sr}")
-    print(f"global : {global_lufs:.2f} LUFS-ish")
-    print(f"base gain applied: {base_gain_db:.2f} dB")
+        out *= lin(delta_db)
+        out = true_peak_limiter(out, sr)
 
+    # SAFETY + EXPORT
+    out = np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
+    out = np.clip(out, -1.0, 1.0)
+    export_pcm16_wav(out, sr, output_path)
+
+    peak = np.max(np.abs(out))
+    lufs_final = measure_lufs(np.mean(out, axis=1), sr)
+
+    print(f"input LUFS : {lufs_in:.2f}")
+    print(f"final LUFS : {lufs_final:.2f}")
+    print(f"final peak : {peak:.6f}")
+    print("done")
+
+
+# ============================================================
+# MAIN
+# ============================================================
 
 def main():
-    p = argparse.ArgumentParser(description="Curve-based loudness shaper / ready-to-go processor.")
+    p = argparse.ArgumentParser(description="Curve-based loudness shaper / broadcast pre-processor.")
     p.add_argument("input", help="Input audio file")
     p.add_argument("output", help="Output audio file")
-    p.add_argument("--target-lufs", type=float, default=-14.0, help="Target loudness level")
+    p.add_argument("--target-lufs", type=float, default=TARGET_LUFS_DEFAULT, help="Target loudness level")
     args = p.parse_args()
+
     process(args.input, args.output, target_lufs=args.target_lufs)
 
 
