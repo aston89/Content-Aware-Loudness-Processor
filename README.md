@@ -248,6 +248,17 @@ It is not intended to replace a mastering engineer but to make material more con
 
 ---
 
+## Important notes : 
+
+When CALP is applied to material that is already heavily limited or “brickwalled” (common in modern loud genres like hardcore, techno, or commercial EDM compilations), its behavior can become noticeably more than a simple volume adjustment. In these cases, the signal has very little remaining dynamic range and most of its energy is already pressed close to the ceiling, which means there is not much “natural headroom structure” left for a traditional loudness normalization process to work with.
+CALP still tries to reach the target LUFS by combining global gain with band-dependent and feature-driven adjustments, but because the input dynamics are already highly compressed, the internal analysis (crest factor, transient content, and band-wise energy distribution) starts to dominate the outcome more than the original mix balance itself.
+As a result, different frequency regions may be attenuated or preserved unevenly depending on their residual dynamic behavior: low frequencies often appear more prominent because they are typically more stable and less transient-heavy, while midrange content-where most of the transient density and perceived “activity” lives-can be slightly reduced due to its higher variability in crest and transient metrics. 
+High frequencies may also shift depending on how much transient energy is detected and how the gating logic responds, this can create the impression that CALP is “reshaping” the spectral balance rather than simply lowering loudness, especially when reducing a track from an already very loud master (e.g. around -10 LUFS) down to a lower target like -14 LUFS, in reality, CALP is not breaking the mix, it is reacting to the lack of dynamic information by emphasizing the remaining statistical differences between bands.
+In well-mastered dynamic material, this effect is subtle and mostly transparent but on brickwalled audio it becomes much more audible because the processor is effectively operating on the edge of the signal’s resolution rather than within a rich dynamic envelope.
+
+
+---
+
 ## Emergent behavior under extreme operational regimes
 
 During testing, CALP was intentionally driven beyond typical mastering ranges like -6 LUFS region and below in order to observe failure modes and limiter interaction under extreme conditions.
